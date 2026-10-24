@@ -48,8 +48,8 @@ int main()
   print_queue.join();   // every line has been printed
   std::cout << "all work done\n";
 
-  jobs.close();         // let the threads fall out of their loops
-  print_queue.close();
+  jobs.shutdown();      // let the threads fall out of their loops
+  print_queue.shutdown();
   for (auto& w : workers) {
     w.join();
   }

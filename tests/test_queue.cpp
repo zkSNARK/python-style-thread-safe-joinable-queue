@@ -47,11 +47,11 @@ static void test_join_waits_for_the_work_not_the_pops()
   for (int i = 0; i < 5; ++i) q.push(i);
   q.join();
   CHECK(done == 5);
-  q.close();
+  q.shutdown();
   worker.join();
 }
 
-static void test_join_on_an_idle_queue_returns_and_close_wakes_idle_consumers()
+static void test_join_on_an_idle_queue_returns_and_shutdown_wakes_idle_consumers()
 {
   ThreadSafeQueue<int> q;
   std::vector<std::thread> consumers;
@@ -62,26 +62,26 @@ static void test_join_on_an_idle_queue_returns_and_close_wakes_idle_consumers()
   q.push(1);
   std::this_thread::sleep_for(50ms);           // everyone drained and is now blocked in get()
   CHECK(finishes_within(1000ms, [&] { q.join(); }));
-  q.close();
+  q.shutdown();
   CHECK(finishes_within(1000ms, [&] { for (auto& c : consumers) c.join(); }));
   CHECK(exited == 3);
 }
 
-static void test_close_drains_then_returns_nullopt()
+static void test_shutdown_drains_then_returns_nullopt()
 {
   ThreadSafeQueue<int> q;
   q.push(1);
   q.push(2);
-  q.close();
+  q.shutdown();
   CHECK(!q.push(3));
   CHECK(!q.emplace(3));
   CHECK(q.get() == 1);
   CHECK(q.get() == 2);
   CHECK(!q.get().has_value());
-  CHECK(q.closed());
+  CHECK(q.is_shutdown());
 }
 
-static void test_bounded_queue_blocks_producers_and_close_releases_them()
+static void test_bounded_queue_blocks_producers_and_shutdown_releases_them()
 {
   ThreadSafeQueue<int> q{2};
   CHECK(q.push(1) && q.push(2));
@@ -100,9 +100,40 @@ static void test_bounded_queue_blocks_producers_and_close_releases_them()
   std::atomic<int> result{-1};
   std::thread blocked{[&] { result = q.push(4) ? 1 : 0; }};
   std::this_thread::sleep_for(50ms);
-  q.close();
+  q.shutdown();
   CHECK(finishes_within(1000ms, [&] { blocked.join(); }));
   CHECK(result == 0);
+}
+
+static void test_immediate_shutdown_discards_items_and_releases_join()
+{
+  ThreadSafeQueue<int> q;
+  for (int i = 0; i < 5; ++i) q.push(i);
+  auto in_flight = q.get();                    // one item is being worked on
+  CHECK(in_flight == 0);
+  std::atomic<bool> joined{false};
+  std::thread joiner{[&] { q.join(); joined = true; }};
+  std::this_thread::sleep_for(30ms);
+  CHECK(!joined);
+  q.shutdown(true);                            // drops the 4 queued items and their tasks
+  CHECK(q.empty() && !q.get().has_value() && !q.push(9));
+  CHECK(q.unfinished_tasks() == 1);
+  std::this_thread::sleep_for(30ms);
+  CHECK(!joined);                              // still waiting on the in-flight item
+  q.task_done();
+  CHECK(finishes_within(1000ms, [&] { joiner.join(); }));
+  CHECK(joined);
+}
+
+static void test_immediate_shutdown_wakes_join_when_nothing_in_flight()
+{
+  ThreadSafeQueue<int> q;
+  q.push(1);
+  q.push(2);
+  std::thread joiner{[&] { q.join(); }};
+  std::this_thread::sleep_for(30ms);
+  q.shutdown(true);
+  CHECK(finishes_within(1000ms, [&] { joiner.join(); }));
 }
 
 static void test_non_blocking_and_timed_get()
@@ -157,7 +188,7 @@ static void test_many_producers_many_consumers()
   CHECK(count == n);
   CHECK(sum == n * (n - 1) / 2);
   CHECK(q.unfinished_tasks() == 0 && q.empty());
-  q.close();
+  q.shutdown();
   for (auto& t : threads) t.join();
 }
 
@@ -165,9 +196,11 @@ int main()
 {
   struct { const char* name; void (*fn)(); } tests[] = {
     {"join waits for the work, not the pops", test_join_waits_for_the_work_not_the_pops},
-    {"join on idle queue returns; close wakes idle consumers", test_join_on_an_idle_queue_returns_and_close_wakes_idle_consumers},
-    {"close drains, then get() returns nullopt", test_close_drains_then_returns_nullopt},
-    {"bounded queue blocks producers; close releases them", test_bounded_queue_blocks_producers_and_close_releases_them},
+    {"join on idle queue returns; shutdown wakes idle consumers", test_join_on_an_idle_queue_returns_and_shutdown_wakes_idle_consumers},
+    {"shutdown drains, then get() returns nullopt", test_shutdown_drains_then_returns_nullopt},
+    {"bounded queue blocks producers; shutdown releases them", test_bounded_queue_blocks_producers_and_shutdown_releases_them},
+    {"shutdown(immediate) discards items, join waits for in-flight", test_immediate_shutdown_discards_items_and_releases_join},
+    {"shutdown(immediate) releases join with nothing in flight", test_immediate_shutdown_wakes_join_when_nothing_in_flight},
     {"try_get / get_for", test_non_blocking_and_timed_get},
     {"task_done too many times throws", test_task_done_too_many_times_throws},
     {"move-only items", test_move_only_items},
