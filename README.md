@@ -1,6 +1,50 @@
 # python-style-thread-safe-joinable-queue
 
-A c++ thread safe queue modeled from the python queue. 
+A header-only C++17 multi-producer / multi-consumer queue with the semantics of Python's
+[`queue.Queue`](https://docs.python.org/3/library/queue.html), so the patterns from Raymond
+Hettinger's PyCon 2016 talk ["Thinking about Concurrency"](https://youtu.be/Bv25Dwe84g0) carry
+over directly.
 
-The general idea here is that we can use a similar API to the python queue for get() and join() which will allow us to implement the behaviors described in the video of pycon 2016 https://youtu.be/Bv25Dwe84g0 "Thinking about Concurrency, Raymond Hettinger."
+```cpp
+#include "ThreadSafeQueue.hpp"
 
+ThreadSafeQueue<Job> jobs{64};            // optional max size; 0 (default) = unbounded
+
+// consumer
+while (auto job = jobs.get()) {           // blocks; std::nullopt once closed and drained
+  run(*job);
+  jobs.task_done();                       // this item is fully processed
+}
+
+// producer
+for (auto& j : work) jobs.push(j);        // blocks while the queue is full
+jobs.join();                              // waits until every item is task_done(), not just dequeued
+jobs.close();                             // consumers drain what is left, then get() returns nullopt
+```
+
+| Python `queue.Queue` | `ThreadSafeQueue<T>` |
+|---|---|
+| `Queue(maxsize)` | `ThreadSafeQueue<T>(max_size)` |
+| `put(x)` / `put_nowait(x)` / `put(x, timeout=t)` | `push(x)` / `try_push(x)` / `push_for(x, t)`, plus `emplace(args...)` |
+| `get()` / `get_nowait()` / `get(timeout=t)` | `get()` / `try_get()` / `get_for(t)`, returning `std::optional<T>` |
+| `task_done()` (ValueError if overcalled) | `task_done()` (`std::logic_error` if overcalled) |
+| `join()` | `join()` |
+| `qsize()` / `empty()` / `full()` | `size()` / `empty()` / `full()`, plus `unfinished_tasks()` |
+| sentinel values to stop consumers | `close()` / `closed()` |
+
+Pushes after `close()` return `false`. `close()` also wakes producers blocked on a full queue.
+The queue must outlive every thread using it.
+
+`main.cpp` is the worker-pool example from the talk: four workers, a single printer thread that
+owns stdout, and `join()` on each stage.
+
+## Build and test
+
+```sh
+cmake -S . -B build && cmake --build build
+./build/test_queue      # or: ctest --test-dir build
+./build/example
+
+# with ThreadSanitizer
+cmake -S . -B build-tsan -DTSQ_SANITIZE_THREAD=ON && cmake --build build-tsan && ./build-tsan/test_queue
+```
